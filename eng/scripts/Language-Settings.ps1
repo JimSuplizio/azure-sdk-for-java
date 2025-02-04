@@ -15,12 +15,12 @@ $PackageRepositoryUri = "https://repo1.maven.org/maven2"
 function Get-AllPackageInfoFromRepo([string]$serviceDirectory = $null) {
   $SdkType = $Env:SdkType
   if ($SdkType) {
-    Write-Host "SdkType env var was set to '$SdkType'"
+    Write-Verbose "SdkType env var was set to '$SdkType'"
   } else {
     $SdkType = "client"
-    Write-Host "SdkType env var was not set, default to 'client'"
+    Write-Verbose "SdkType env var was not set, default to 'client'"
   }
-  Write-Host "Processing SdkType=$SdkType"
+  Write-Verbose "Processing SdkType=$SdkType"
 
   $allPackageProps = @()
   $sdkRoot = Join-Path $RepoRoot "sdk"
@@ -28,7 +28,7 @@ function Get-AllPackageInfoFromRepo([string]$serviceDirectory = $null) {
 
   if ($serviceDirectory) {
     $searchPath = Join-Path $sdkRoot $serviceDirectory
-    Write-Host "searchPath=$searchPath"
+    Write-Verbose "searchPath=$searchPath"
     [array]$ymlFiles = Get-ChildItem -Path $searchPath "ci*.yml" | Where-Object { $_.PSIsContainer -eq $false}
   } else {
     # The reason for the exclude folders are POM only releases (nothing is built) or
@@ -56,7 +56,7 @@ function Get-AllPackageInfoFromRepo([string]$serviceDirectory = $null) {
     # 6a. If #5 has a match, create the PackageProp and add it to the list
     # 6b. If #5 doesn't have a match, then skip it. This is the case where it's either
     #     an AdditionalModule or something from another track.
-    Write-Host "Processing $ymlFile"
+    Write-Verbose "Processing $ymlFile"
     $ymlFileContent = LoadFrom-Yaml $ymlFile
     $YmlFileSdkType = GetValueSafelyFrom-Yaml $ymlFileContent @("extends", "parameters", "SDKType")
     $ymlDir = Split-Path -Path $ymlFile -Parent
@@ -65,7 +65,7 @@ function Get-AllPackageInfoFromRepo([string]$serviceDirectory = $null) {
       $YmlFileSdkType = "client"
     }
     if ($YmlFileSdkType -ne $SdkType) {
-      Write-Host "SdkType in yml file is '$YmlFileSdkType' which is not '$SdkType', skipping..."
+      Write-Verbose "SdkType in yml file is '$YmlFileSdkType' which is not '$SdkType', skipping..."
       continue
     }
     # ServiceDirectory
@@ -125,17 +125,17 @@ function Get-AllPackageInfoFromRepo([string]$serviceDirectory = $null) {
       $xmlPomFile.Load($pomFile)
 
       if ($xmlPomFile.project.psobject.properties.name -notcontains "artifactId" -or !$xmlPomFile.project.artifactId) {
-        Write-Host "$pomFile doesn't have a defined artifactId so skipping this pom."
+        Write-Verbose "$pomFile doesn't have a defined artifactId so skipping this pom."
         continue
       }
 
       if ($xmlPomFile.project.psobject.properties.name -notcontains "version" -or !$xmlPomFile.project.version) {
-        Write-Host "$pomFile doesn't have a defined version so skipping this pom."
+        Write-Verbose "$pomFile doesn't have a defined version so skipping this pom."
         continue
       }
 
       if ($xmlPomFile.project.psobject.properties.name -notcontains "groupid" -or !$xmlPomFile.project.groupId) {
-        Write-Host "$pomFile doesn't have a defined groupId so skipping this pom."
+        Write-Verbose "$pomFile doesn't have a defined groupId so skipping this pom."
         continue
       }
 
@@ -145,7 +145,7 @@ function Get-AllPackageInfoFromRepo([string]$serviceDirectory = $null) {
       $keyFromPom = "$($xmlPomFile.project.groupId):$($xmlPomFile.project.artifactId)"
       if (-not $ArtifactsHashSet.Contains($keyFromPom))
       {
-        Write-Host "$ymlFile does not contain $($xmlPomFile.project.groupId):$($xmlPomFile.project.artifactId), skipping"
+        Write-Verbose "$ymlFile does not contain $($xmlPomFile.project.groupId):$($xmlPomFile.project.artifactId), skipping"
         continue
       }
       # At this point everything is valid
@@ -191,113 +191,6 @@ function Get-AllPackageInfoFromRepo([string]$serviceDirectory = $null) {
     }
   }
   return $allPackageProps
-}
-
-# Get-java-AdditionalValidationPackagesFromPackageSet is the implementation of the
-# $AdditionalValidationPackagesFromPackageSetFn which is used
-function Get-java-AdditionalValidationPackagesFromPackageSet {
-  param(
-    [Parameter(Mandatory=$true)]
-    $LocatedPackages,
-    [Parameter(Mandatory=$true)]
-    $diffObj,
-    [Parameter(Mandatory=$true)]
-    $AllPkgProps
-  )
-  $additionalValidationPackages = @()
-  $uniqueResultSet = @()
-
-  # Anything that starts with these prefixes will add azure-template
-  $templateStartsWithPrefixes = @(".config", ".devcontainer", ".github", ".vscode", "common", "doc", "samples")
-  # Anything that starts with these prefixes will add azure-core. Unfortunately, core will always
-  # run if anything in parents is changed, including clientcore-parent. Once we start having
-  # different things based upon subdirectories it gets wonky
-  $coreStartsWithPrefixes = @("eng", "sdk/parents")
-  $clientcoreStartsWithPrefixes = @("sdk/parents/clientcore-parent")
-  # For these directories, just run template
-  function isOther($fileName, $startsWithPrefixes) {
-    $startsWith = $false
-    foreach ($prefix in $startsWithPrefixes) {
-      if ($fileName.StartsWith($prefix)) {
-        $startsWith = $true
-      }
-    }
-
-    return $startsWith
-  }
-
-  # this section will identify the list of packages that we should treat as
-  # "directly" changed for a given service level change. While that doesn't
-  # directly change a package within the service, I do believe we should directly include all
-  # packages WITHIN that service. This is because the service level file changes are likely to
-  # have an impact on the packages within that service.
-
-  # JRS - After chatting with Alan, erroring on the side of caution. The thing is,
-  # not all ServiceDirectories will do this, only the ones with ci.yml files which
-  # aren't SdkType=data. What to do with changes in a ServiceDirectory that only has
-  # pipelines at the library level?  $changedServices = @()
-  if ($diffObj.ChangedFiles) {
-    foreach($file in $diffObj.ChangedFiles) {
-      $pathComponents = $file -split "/"
-      # handle changes only in sdk/<service>/<file>/<extension>
-      if ($pathComponents.Length -eq 3 -and $pathComponents[0] -eq "sdk") {
-        $changedServices += $pathComponents[1]
-      }
-
-      # handle any changes under sdk/<file>.<extension>
-      if ($pathComponents.Length -eq 2 -and $pathComponents[0] -eq "sdk") {
-        $changedServices += "template"
-      }
-    }
-    foreach ($changedService in $changedServices) {
-      $additionalPackages = $AllPkgProps | Where-Object { $_.ServiceDirectory -eq $changedService }
-
-      foreach ($pkg in $additionalPackages) {
-        if ($uniqueResultSet -notcontains $pkg -and $LocatedPackages -notcontains $pkg) {
-          # notice the lack of setting IncludedForValidation to true. This is because these "changed services"
-          # are specifically where a file within the service, but not an individual package within that service has changed.
-          # we want this package to be fully validated
-          $uniqueResultSet += $pkg
-        }
-      }
-    }
-  }
-
-  $othersChanged = @()
-  $engChanged = @()
-
-  if ($diffObj.ChangedFiles) {
-    $engChanged = $diffObj.ChangedFiles | Where-Object { $_.StartsWith("eng")}
-    # JRS -
-    $engChanged = $diffObj.ChangedFiles | Where-Object { $_.StartsWith("sdk/parents")}
-    $othersChanged = $diffObj.ChangedFiles | Where-Object { isOther($_) }
-  }
-
-  $changedServices = $changedServices | Get-Unique
-
-  if ($engChanged -or $othersChanged) {
-    $additionalPackages = @(
-      "azure-template",
-      "azure-core"
-    ) | ForEach-Object { $me=$_; $AllPkgProps | Where-Object { $_.Name -eq $me } | Select-Object -First 1 }
-
-    $additionalValidationPackages += $additionalPackages
-  }
-
-
-  foreach ($pkg in $additionalValidationPackages) {
-    if ($uniqueResultSet -notcontains $pkg -and $LocatedPackages -notcontains $pkg) {
-      $pkg.IncludedForValidation = $true
-      $uniqueResultSet += $pkg
-    }
-  }
-
-  Write-Host "Returning additional packages for validation: $($uniqueResultSet.Count)"
-  foreach ($pkg in $uniqueResultSet) {
-    Write-Host "  - $($pkg.Name)"
-  }
-
-  return $uniqueResultSet
 }
 
 # Returns the maven (really sonatype) publish status of a package id and version.
@@ -581,7 +474,7 @@ function GetExistingPackageVersions ($PackageName, $GroupId=$null)
     $response = (Invoke-RestMethod -Method GET -Uri $Uri).response
     if($response.numFound -ne 0)
     {
-      $existingVersion = $response.docs.v
+      $existingVersion = @($response.docs.v)
       if ($existingVersion.Count -gt 0)
       {
         [Array]::Reverse($existingVersion)
